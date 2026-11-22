@@ -190,9 +190,10 @@ export function removeSignal(signal: string): boolean
 export function setCustomExitCode(code: number): void
 
 /**
- * Sets the global error handling strategy for phase and signal-specific handlers.
+ * Sets the global error handling strategy for handlers and the shutdown finalizer.
  * Defaults to continue: log the error and proceed, without changing the exit code.
- * stop exits immediately with the custom code if set, otherwise 1.
+ * stop skips remaining handlers and awaits a configured finalizer in terminating
+ * shutdown. It exits with the custom code if set, otherwise 1.
  * @param strategy The error handling strategy, either 'continue' or 'stop'.
  * @example
  * setErrorHandlingStrategy('continue');
@@ -200,9 +201,18 @@ export function setCustomExitCode(code: number): void
 export function setErrorHandlingStrategy(strategy: ErrorHandlingStrategy): void
 
 /**
+ * Sets or replaces the callback that runs once after the shutdown phases finish
+ * or are skipped after a stop error, including a terminating signal handler error.
+ * Shutdown captures the callback at the start and awaits it under the original
+ * deadline. Pass undefined or omit the handler to clear it.
+ * @param handler The finalizer, which receives the original shutdown trigger.
+ */
+export function setShutdownFinalizer(handler?: Handler): void
+
+/**
  * Sets the timeout for the shutdown process. If the shutdown does not complete within this timeframe, the process is forcefully terminated.
- * One deadline covers the terminating signal-specific handler, if any, and all subsequent phased cleanup.
- * Starting phased cleanup does not reset the deadline.
+ * One deadline covers the terminating signal-specific handler, all phases, and
+ * the finalizer, if configured.
  * Handlers with `shouldTerminate: false` do not start this deadline.
  * Uses Node.js timers: event-loop blocking can delay termination, and OS termination can bypass cleanup.
  * Defaults to 30000 ms. Requires a positive finite number; Node timer delay

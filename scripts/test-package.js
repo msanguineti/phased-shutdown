@@ -128,11 +128,13 @@ import * as api from 'phased-shutdown'
 import {
   addSignal, listHandlers, listSignals, registerHandler, removeHandler,
   removeSignal, setCustomExitCode, setErrorHandlingStrategy, setShutdownTimeout,
+  setShutdownFinalizer,
 } from 'phased-shutdown'
 
 assert.deepStrictEqual(Object.keys(api).toSorted((left, right) => left.localeCompare(right)), [
   'addSignal', 'listHandlers', 'listSignals', 'registerHandler', 'removeHandler',
-  'removeSignal', 'setCustomExitCode', 'setErrorHandlingStrategy', 'setShutdownTimeout',
+  'removeSignal', 'setCustomExitCode', 'setErrorHandlingStrategy', 'setShutdownFinalizer',
+  'setShutdownTimeout',
 ].toSorted((left, right) => left.localeCompare(right)))
 for (const value of Object.values(api)) assert.equal(typeof value, 'function')
 assert.equal(import.meta.resolve('phased-shutdown'),
@@ -153,6 +155,11 @@ registerHandler(async (signal) => {
   assert.equal(signal, 'app:shutdown')
   await delay(20)
   console.log('phase 1 complete')
+})
+setShutdownFinalizer(async (signal) => {
+  assert.equal(signal, 'app:shutdown')
+  await delay(20)
+  console.log('finalizer complete')
 })
 assert.equal(listHandlers().length, 2)
 addSignal('app:shutdown')
@@ -175,7 +182,10 @@ setTimeout(() => assert.fail('shutdown did not terminate'), 3000)
       `Unexpected shutdown result: ${child.stderr}`,
     )
     assert.equal(child.stderr, '')
-    assert.equal(child.stdout, 'phase 1 complete\nphase 2\n')
+    assert.equal(
+      child.stdout,
+      'phase 1 complete\nphase 2\nfinalizer complete\n',
+    )
 
     // The compiler and Node ambient types are tooling; package resolution stays
     // in the isolated consumer, without paths/baseUrl or repository self-reference.
