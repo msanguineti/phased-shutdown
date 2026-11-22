@@ -17,7 +17,7 @@ registerHandler(disconnectDatabase, { identifier: 'database', phase: 2 })
 
 Register required cleanup during startup. Shutdown takes a fixed snapshot of phased registrations before any handler runs. Removing a pending handler skips it; removing a running handler does not cancel it. New registrations, including replacements of removed identifiers, are excluded from active cleanup. Perform and await any late cleanup directly inside a running handler.
 
-A terminating signal-specific handler runs first, followed by the phases, under one guard and deadline. Further terminating events, including `beforeExit`, are ignored. The first trigger's argument is passed to all handlers and determines the normal exit code. Other application process listeners remain attached; coordinate them to avoid competing cleanup or premature exit.
+A terminating signal-specific handler runs first, followed by the phases and an optional finalizer, under one guard and deadline. Further terminating events, including `beforeExit`, are ignored. The first trigger's argument is passed to all handlers and the finalizer and determines the normal exit code. Other application process listeners remain attached; coordinate them to avoid competing cleanup or premature exit.
 
 ## Platforms and limitations
 
@@ -71,19 +71,23 @@ Close over the event name if you need it inside the handler. See [exit-code sele
 ```js
 import {
   setErrorHandlingStrategy,
+  setShutdownFinalizer,
   setShutdownTimeout,
   setCustomExitCode,
 } from 'phased-shutdown'
 
 setErrorHandlingStrategy('stop')
 setShutdownTimeout(20_000)
+setShutdownFinalizer(() => flushLogs())
 // Optional: overrides every exit path, including failures.
 setCustomExitCode(0)
 ```
 
-The default error strategy is `continue`: log a thrown/rejected error and run the remaining cleanup. A failed terminating signal-specific handler also proceeds to the phases. `stop` immediately exits and skips remaining handlers.
+The default error strategy is `continue`: log a thrown/rejected error and run the remaining cleanup. A failed terminating signal-specific handler also proceeds to the phases. Under `stop`, a terminating shutdown skips remaining handlers and runs the configured finalizer before exiting. With no finalizer configured, it exits immediately.
 
-The default deadline is **30 seconds**, shared by the terminating signal-specific handler and all phases. It starts before any cleanup, is never reset, and keeps Node alive while async cleanup is pending. Non-terminating handlers start no timer. Timeout forces exit rather than guaranteeing completion.
+Use `setShutdownFinalizer(handler)` to set or replace one synchronous or asynchronous callback. Omit the argument or pass `undefined` to clear it. The runner captures it when shutdown starts, passes it the original trigger argument, and awaits it once. Use it for work that is safe after failed or skipped phases, such as flushing logs. Thrown or rejected errors from the finalizer are logged and follow the same exit-code policy.
+
+The default deadline is **30 seconds**, shared by the terminating signal-specific handler, all phases, and the optional finalizer. It starts before cleanup and keeps Node alive while async cleanup is pending. Non-terminating handlers start no timer. If the deadline expires, forced exit can prevent the finalizer from running or interrupt it.
 
 The timeout uses Node's `setTimeout`: synchronous blocking or event-loop starvation delays it. Keep synchronous work short. Node truncates fractional delays and converts values below `1` or above `2_147_483_647` milliseconds to `1` millisecond; see [timer semantics](https://nodejs.org/api/timers.html#settimeoutcallback-delay-args).
 
@@ -125,6 +129,7 @@ Invalid types throw `TypeError`; invalid phases, incompatible options, duplicate
 | `removeSignal(signal: string): boolean`                                | `true` if a general trigger was removed, otherwise `false`.                                       |
 | `listSignals(options?: { includeSignalHandlers?: boolean }): string[]` | General triggers; set `includeSignalHandlers: true` to include signal-specific events.            |
 | `setErrorHandlingStrategy(strategy): void`                             | `'continue'` (default) or `'stop'`.                                                               |
+| `setShutdownFinalizer(handler?: Handler): void`                        | Set, replace, or clear the callback run before a terminating shutdown exits.                      |
 | `setShutdownTimeout(timeout: number): void`                            | Positive finite milliseconds.                                                                     |
 | `setCustomExitCode(code: number): void`                                | Numeric safe integer overriding every shutdown exit path.                                         |
 

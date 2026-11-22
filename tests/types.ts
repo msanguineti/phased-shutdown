@@ -3,6 +3,7 @@ import {
   listSignals,
   registerHandler,
   setErrorHandlingStrategy,
+  setShutdownFinalizer,
   type Handler,
 } from 'phased-shutdown'
 
@@ -62,6 +63,17 @@ console.log(emptyIdentifier, emptyEventIdentifier)
 
 setErrorHandlingStrategy('continue')
 setErrorHandlingStrategy('stop')
+
+setShutdownFinalizer(handler)
+setShutdownFinalizer((trigger) => {
+  const value: string | number | Error = trigger
+  console.log(value)
+})
+setShutdownFinalizer(undefined)
+setShutdownFinalizer()
+
+// @ts-expect-error only a handler or undefined is accepted.
+setShutdownFinalizer(null)
 
 // @ts-expect-error invalid error handling strategy.
 setErrorHandlingStrategy('ignore')

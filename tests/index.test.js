@@ -30,6 +30,7 @@ const runShutdownScenario = (source, expectations = {}) =>
           removeSignal,
           setCustomExitCode,
           setErrorHandlingStrategy,
+          setShutdownFinalizer,
           setShutdownTimeout,
         } from 'phased-shutdown'
         addSignal('app:shutdown')
@@ -1030,6 +1031,181 @@ describe('Portable process events and API (no OS signal delivery)', () => {
         stderr.includes('Stopping shutdown process due to error in handler.'),
       )
     })
+  })
+
+  describe('Finalizer', () => {
+    for (const strategy of ['continue', 'stop']) {
+      it(`awaits the captured finalizer once after successful phases under ${strategy}`, () =>
+        runShutdownScenario(
+          `
+            import assert from 'node:assert/strict'
+
+            setErrorHandlingStrategy('${strategy}')
+            setShutdownFinalizer(() => assert.fail('replaced finalizer ran'))
+            setShutdownFinalizer(async (trigger) => {
+              console.log('finalizer start: ' + trigger)
+              process.emit('app:interrupt', 77)
+              await delay(20)
+              console.log('finalizer finished')
+            })
+            assert.throws(() => setShutdownFinalizer(null), TypeError)
+            registerHandler(() => {
+              setShutdownFinalizer(() => assert.fail('late finalizer ran'))
+              console.log('phase 1')
+            })
+            registerHandler(() => console.log('phase 2'), { phase: 2 })
+            process.emit('app:shutdown', 23)
+          `,
+          {
+            stdoutExpectation: expectLines(
+              'phase 1',
+              'phase 2',
+              'finalizer start: 23',
+              'finalizer finished',
+            ),
+            exitCodeExpectation: 23,
+          },
+        ))
+    }
+
+    it('clears the finalizer when called without a handler', () =>
+      runShutdownScenario(`
+        import assert from 'node:assert/strict'
+
+        setShutdownFinalizer(() => assert.fail('cleared finalizer ran'))
+        setShutdownFinalizer()
+        process.emit('app:shutdown', 0)
+      `))
+
+    for (const scenario of [
+      {
+        strategy: 'continue',
+        kind: 'phase',
+        runsPhase: true,
+        runsFinalizer: true,
+      },
+      {
+        strategy: 'stop',
+        kind: 'phase',
+        runsPhase: false,
+        runsFinalizer: true,
+      },
+      {
+        strategy: 'stop',
+        kind: 'terminating signal',
+        runsPhase: false,
+        runsFinalizer: true,
+      },
+      {
+        strategy: 'stop',
+        kind: 'non-terminating signal',
+        runsPhase: false,
+        runsFinalizer: false,
+      },
+    ]) {
+      const { strategy, kind, runsPhase, runsFinalizer } = scenario
+      const isSignal = kind !== 'phase'
+      it(`handles a ${kind} failure under ${strategy}`, () =>
+        runShutdownScenario(
+          `
+            setErrorHandlingStrategy('${strategy}')
+            registerHandler(async () => {
+              throw new Error('ordinary cleanup failed')
+            }, {
+              identifier: 'failing',
+              ${isSignal ? `signal: 'app:shutdown', shouldTerminate: ${kind === 'terminating signal'}` : ''}
+            })
+            registerHandler(() => console.log('later handler'))
+            registerHandler(() => console.log('later phase'), { phase: 2 })
+            setShutdownFinalizer((trigger) => console.log('finalizer: ' + trigger))
+            process.emit('app:shutdown', 23)
+          `,
+          {
+            stdoutExpectation: runsFinalizer
+              ? expectLines(
+                  ...(runsPhase ? ['later handler', 'later phase'] : []),
+                  'finalizer: 23',
+                )
+              : undefined,
+            stderrExpectation: expectLines(
+              isSignal
+                ? "Error in handler 'failing': Error: ordinary cleanup failed"
+                : "Error in shutdown handler 'failing' for phase '1': Error: ordinary cleanup failed",
+              ...(strategy === 'stop'
+                ? ['Stopping shutdown process due to error in handler.']
+                : []),
+            ),
+            exitCodeExpectation: strategy === 'stop' ? 1 : 23,
+          },
+        ))
+    }
+
+    for (const finalizerStarts of [false, true]) {
+      it(`keeps the original deadline when the finalizer ${finalizerStarts ? 'starts' : 'has not started'}`, () =>
+        runShutdownScenario(
+          `
+            import assert from 'node:assert/strict'
+
+            setShutdownTimeout(550)
+            setCustomExitCode(42)
+            registerHandler(async () => {
+              ${finalizerStarts ? 'await delay(350)' : 'await new Promise(() => {})'}
+            })
+            setShutdownFinalizer(async () => {
+              console.log('finalizer started')
+              await delay(350)
+              assert.fail('finalizer got a fresh deadline')
+            })
+            process.emit('app:shutdown', 23)
+          `,
+          {
+            stdoutExpectation: finalizerStarts
+              ? expectLines('finalizer started')
+              : undefined,
+            stderrExpectation: expectLines(
+              'Shutdown process timed out. Forcing exit.',
+            ),
+            exitCodeExpectation: 42,
+          },
+        ))
+    }
+
+    for (const [strategy, priorFailure, expectedExitCode] of [
+      ['continue', false, 23],
+      ['stop', false, 1],
+      ['stop', true, 42],
+    ]) {
+      it(`logs a finalizer failure under ${strategy}${priorFailure ? ' after an earlier error' : ''}`, () =>
+        runShutdownScenario(
+          `
+            setErrorHandlingStrategy('${strategy}')
+            ${
+              priorFailure
+                ? `setCustomExitCode(42)
+                registerHandler(() => { throw new Error('phase failed') }, {
+                  identifier: 'failing',
+                })`
+                : ''
+            }
+            setShutdownFinalizer(async () => {
+              throw new Error('finalizer failed')
+            })
+            process.emit('app:shutdown', 23)
+          `,
+          {
+            stderrExpectation: expectLines(
+              ...(priorFailure
+                ? [
+                    "Error in shutdown handler 'failing' for phase '1': Error: phase failed",
+                    'Stopping shutdown process due to error in handler.',
+                  ]
+                : []),
+              'Error in shutdown finalizer: Error: finalizer failed',
+            ),
+            exitCodeExpectation: expectedExitCode,
+          },
+        ))
+    }
   })
 
   describe('Custom exit code', () => {

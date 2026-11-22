@@ -17,6 +17,7 @@ const removedSignals = new Set()
 const state = {
   isShuttingDown: false,
   shutdownTimeout: 30_000, // Default timeout of 30 seconds
+  shutdownFinalizer: undefined,
   customExitCode: undefined,
   errorHandlingStrategy: 'continue', // Default strategy is to continue on error
 }
@@ -66,7 +67,7 @@ const registerSignalHandler = (
       return
     }
 
-    const runHandler = async () => {
+    const runHandler = async (hasFinalizer = false) => {
       logger(`Handling signal: ${signal}`)
       try {
         await customHandler.handler(signal)
@@ -74,9 +75,11 @@ const registerSignalHandler = (
         console.error(`Error in handler '${identifier}': ${error}`)
         if (state.errorHandlingStrategy === 'stop') {
           console.error('Stopping shutdown process due to error in handler.')
+          if (hasFinalizer) return true
           process.exit(state.customExitCode ?? 1) //eslint-disable-line unicorn/no-process-exit
         }
       }
+      return false
     }
 
     if (customHandler.shouldTerminate) {
@@ -361,6 +364,14 @@ const setShutdownTimeout = (timeout) => {
   state.shutdownTimeout = timeout
 }
 
+const setShutdownFinalizer = (handler) => {
+  if (handler !== undefined && typeof handler !== 'function') {
+    throw new TypeError('Shutdown finalizer must be a function')
+  }
+
+  state.shutdownFinalizer = handler
+}
+
 // Function to set a custom exit code
 const setCustomExitCode = (code) => {
   if (typeof code !== 'number' || !Number.isSafeInteger(code)) {
@@ -382,43 +393,62 @@ const runShutdown = async (signal, runSignalHandler) => {
   logger(`Shutting down on ${signal}`)
 
   // Freeze the work list before any cleanup, including the signal handler.
-  const shutdownPhases = registeredHandlers
+  const finalizer = state.shutdownFinalizer
+  const shutdownHandlers = registeredHandlers
     .keys()
     .filter((phase) => phase !== 0)
     .toArray()
     .toSorted((a, b) => a - b)
-    .map((phase) => [phase, [...registeredHandlers.get(phase)]])
+    .flatMap((phase) =>
+      [...registeredHandlers.get(phase)].map(([identifier, handlerEntry]) => ({
+        phase,
+        identifier,
+        handlerEntry,
+      })),
+    )
 
   const shutdownTimer = setTimeout(() => {
     console.warn('Shutdown process timed out. Forcing exit.')
     process.exit(state.customExitCode ?? 1) // eslint-disable-line unicorn/no-process-exit
   }, state.shutdownTimeout)
 
-  if (runSignalHandler) {
-    await runSignalHandler()
-  }
+  let stopped = runSignalHandler
+    ? await runSignalHandler(finalizer !== undefined)
+    : false
 
-  for (const [phase, phaseHandlers] of shutdownPhases) {
-    for (const [identifier, handlerEntry] of phaseHandlers) {
-      // Honor removals; reusing an identifier creates a different registration.
-      if (registeredHandlers.get(phase)?.get(identifier) === handlerEntry) {
-        try {
-          await handlerEntry.handler(signal)
-        } catch (error) {
-          console.error(
-            `Error in shutdown handler '${identifier}' for phase '${phase}': ${error}`,
-          )
-          if (state.errorHandlingStrategy === 'stop') {
-            console.error('Stopping shutdown process due to error in handler.')
-            clearTimeout(shutdownTimer)
-            process.exit(state.customExitCode ?? 1) //eslint-disable-line unicorn/no-process-exit
-          }
+  for (const { phase, identifier, handlerEntry } of shutdownHandlers) {
+    if (stopped) break
+
+    // Honor removals; reusing an identifier creates a different registration.
+    if (registeredHandlers.get(phase)?.get(identifier) === handlerEntry) {
+      try {
+        await handlerEntry.handler(signal)
+      } catch (error) {
+        console.error(
+          `Error in shutdown handler '${identifier}' for phase '${phase}': ${error}`,
+        )
+        if (state.errorHandlingStrategy === 'stop') {
+          console.error('Stopping shutdown process due to error in handler.')
+          stopped = true
         }
       }
     }
   }
 
+  if (finalizer) {
+    try {
+      await finalizer(signal)
+    } catch (error) {
+      console.error(`Error in shutdown finalizer: ${error}`)
+      stopped ||= state.errorHandlingStrategy === 'stop'
+    }
+  }
+
   clearTimeout(shutdownTimer)
+  if (stopped) {
+    process.exit(state.customExitCode ?? 1) //eslint-disable-line unicorn/no-process-exit
+  }
+
   logger('Shutdown completed')
   const exitCode = state.customExitCode ?? getExitCode(signal)
   logger(`Shutdown exitCode: ${exitCode}`)
@@ -442,5 +472,6 @@ export {
   removeSignal,
   setCustomExitCode,
   setErrorHandlingStrategy,
+  setShutdownFinalizer,
   setShutdownTimeout,
 }
